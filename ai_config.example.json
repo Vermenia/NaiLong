@@ -1,0 +1,10 @@
+{
+  "useApi": false,
+  "apiEndpoint": "https://api.openai.com/v1/chat/completions",
+  "apiKey": "",
+  "model": "gpt-3.5-turbo",
+  "_comment": "使用说明",
+  "_1": "useApi: false=使用本地模型, true=调用API",
+  "_2": "修改配置后需要重启游戏",
+  "_3": "更多配置示例请查看 AI_CONFIG_README.md"
+}
