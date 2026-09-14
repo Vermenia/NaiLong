@@ -3,8 +3,10 @@ package com.vermenia.nailong.registry;
 import com.vermenia.nailong.NailongMod;
 
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.CreativeModeTabs;
 import net.minecraft.world.item.SpawnEggItem;
 import net.neoforged.bus.api.IEventBus;
+import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
 import net.neoforged.neoforge.registries.DeferredItem;
 import net.neoforged.neoforge.registries.DeferredRegister;
 
@@ -22,5 +24,12 @@ public final class NailongItems {
 
     public static void register(IEventBus modEventBus) {
         ITEMS.register(modEventBus);
+        modEventBus.addListener(NailongItems::addCreativeTabContents);
+    }
+
+    private static void addCreativeTabContents(BuildCreativeModeTabContentsEvent event) {
+        if (event.getTabKey() == CreativeModeTabs.SPAWN_EGGS) {
+            event.accept(NAILONG_SPAWN_EGG.get());
+        }
     }
 }

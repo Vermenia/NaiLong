@@ -16,6 +16,10 @@ import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.entity.monster.RangedAttackMob;
 import net.minecraft.world.entity.ai.goal.FollowOwnerGoal;
 import net.minecraft.world.entity.ai.goal.RangedAttackGoal;
+import net.minecraft.world.entity.ai.goal.Goal;
+import net.minecraft.world.entity.ai.goal.target.OwnerHurtByTargetGoal;
+import net.minecraft.world.entity.ai.goal.target.OwnerHurtTargetGoal;
+import net.minecraft.world.entity.ai.goal.target.HurtByTargetGoal;
 import net.minecraft.world.entity.ai.goal.target.NearestAttackableTargetGoal;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.core.particles.ParticleTypes;
@@ -61,6 +65,8 @@ public final class NailongEntity extends TamableAnimal implements GeoEntity, Ran
     private final AnimatableInstanceCache animationCache = GeckoLibUtil.createInstanceCache(this);
     private final SimpleContainer inventory = new SimpleContainer(9);
     private int autoEatCooldown = 0;
+    private boolean flightLandingProtected;
+    private boolean flightGravityOverride;
 
     public NailongEntity(EntityType<? extends NailongEntity> entityType, Level level) {
         super(entityType, level);
@@ -78,13 +84,17 @@ public final class NailongEntity extends TamableAnimal implements GeoEntity, Ran
     @Override
     protected void registerGoals() {
         this.goalSelector.addGoal(0, new FloatGoal(this));
+        this.goalSelector.addGoal(0, new FollowFlyingOwnerGoal());
         this.goalSelector.addGoal(1, new FollowOwnerGoal(this, 1.15D, 6.0F, 3.0F));
         this.goalSelector.addGoal(2, new RangedAttackGoal(this, 1.0D, 20, FIRE_RANGE));
         this.goalSelector.addGoal(4, new WaterAvoidingRandomStrollGoal(this, 0.8D));
         this.goalSelector.addGoal(5, new LookAtPlayerGoal(this, Player.class, 8.0F));
         this.goalSelector.addGoal(6, new RandomLookAroundGoal(this));
-        this.targetSelector.addGoal(1, new NearestAttackableTargetGoal<>(this, LivingEntity.class,
-                10, true, false, this::canAttack));
+        this.targetSelector.addGoal(1, new OwnerHurtByTargetGoal(this));
+        this.targetSelector.addGoal(2, new OwnerHurtTargetGoal(this));
+        this.targetSelector.addGoal(3, new HurtByTargetGoal(this));
+        this.targetSelector.addGoal(4, new NearestAttackableTargetGoal<>(this, LivingEntity.class,
+                10, true, false, target -> target instanceof Enemy && this.canAttack(target)));
     }
 
     @Override
@@ -144,14 +154,18 @@ public final class NailongEntity extends TamableAnimal implements GeoEntity, Ran
     @Override
     public void tick() {
         super.tick();
+        if (!this.level().isClientSide && this.flightLandingProtected && this.onGround() && !this.isNoGravity()) {
+            this.flightLandingProtected = false;
+        }
         if (!this.level().isClientSide && this.isTame()) {
             if (this.autoEatCooldown > 0) {
                 this.autoEatCooldown--;
-            } else if (this.getHealth() < this.getMaxHealth() * 0.8F) {
+            } else if (this.isAlive() && this.getHealth() < this.getMaxHealth()) {
                 for (int i = 0; i < this.inventory.getContainerSize(); i++) {
                     ItemStack stack = this.inventory.getItem(i);
                     if (stack.is(Items.APPLE)) {
                         stack.shrink(1);
+                        this.inventory.setChanged();
                         this.heal(4.0F);
                         this.level().broadcastEntityEvent(this, (byte)7);
                         this.autoEatCooldown = 10;
@@ -165,6 +179,11 @@ public final class NailongEntity extends TamableAnimal implements GeoEntity, Ran
     @Override
     public void addAdditionalSaveData(CompoundTag tag) {
         super.addAdditionalSaveData(tag);
+        // Flight is temporary AI state; do not reload a permanently weightless pet.
+        if (this.flightGravityOverride) {
+            tag.putBoolean("NoGravity", false);
+        }
+        tag.putBoolean("FlightLandingProtected", this.flightLandingProtected);
         CompoundTag inventoryTag = new CompoundTag();
         for (int i = 0; i < this.inventory.getContainerSize(); i++) {
             ItemStack stack = this.inventory.getItem(i);
@@ -180,6 +199,7 @@ public final class NailongEntity extends TamableAnimal implements GeoEntity, Ran
     @Override
     public void readAdditionalSaveData(CompoundTag tag) {
         super.readAdditionalSaveData(tag);
+        this.flightLandingProtected = tag.getBoolean("FlightLandingProtected");
         // Older saves persist the original 24-point base attribute. Preserve current health
         // and modifiers while upgrading that default; explicit custom base values are retained.
         var health = this.getAttribute(Attributes.MAX_HEALTH);
@@ -210,8 +230,15 @@ public final class NailongEntity extends TamableAnimal implements GeoEntity, Ran
 
     @Override
     public boolean canAttack(LivingEntity target) {
-        return this.isTame() && target instanceof Enemy && !this.isAlliedTo(target)
-                && super.canAttack(target);
+        if (!this.isTame() || target == this || this.isAlliedTo(target) || !super.canAttack(target)) {
+            return false;
+        }
+        if (target instanceof TamableAnimal pet && this.getOwnerUUID() != null
+                && this.getOwnerUUID().equals(pet.getOwnerUUID())) {
+            return false;
+        }
+        return !(target instanceof Player player && this.getOwner() instanceof Player owner)
+                || owner.canHarmPlayer(player);
     }
 
     @Override
@@ -234,7 +261,7 @@ public final class NailongEntity extends TamableAnimal implements GeoEntity, Ran
             server.sendParticles(ParticleTypes.FLAME, point.x, point.y, point.z,
                     2, 0.08D, 0.08D, 0.08D, 0.01D);
         }
-        // Only the selected hostile receives damage; the flame does not create burning blocks.
+        // Only the selected target receives damage; the flame does not create burning blocks.
         if (target.hurt(this.damageSources().mobAttack(this), 6.0F)) {
             target.igniteForSeconds(4.0F);
         }
@@ -254,6 +281,90 @@ public final class NailongEntity extends TamableAnimal implements GeoEntity, Ran
     @Override
     public AnimatableInstanceCache getAnimatableInstanceCache() {
         return animationCache;
+    }
+
+    @Override
+    public boolean causeFallDamage(float distance, float multiplier, DamageSource source) {
+        return !this.flightLandingProtected && super.causeFallDamage(distance, multiplier, source);
+    }
+
+    /** Ground navigation cannot find a destination beside an airborne owner. */
+    private final class FollowFlyingOwnerGoal extends Goal {
+        private Player owner;
+        private boolean previousNoGravity;
+
+        private FollowFlyingOwnerGoal() {
+            this.setFlags(java.util.EnumSet.of(Flag.MOVE, Flag.LOOK, Flag.JUMP));
+        }
+
+        @Override
+        public boolean canUse() {
+            if (!NailongEntity.this.unableToMoveToOwner()
+                    && NailongEntity.this.getOwner() instanceof Player player
+                    && player.isAlive() && (player.getAbilities().flying || player.isFallFlying())) {
+                this.owner = player;
+                return true;
+            }
+            return false;
+        }
+
+        @Override
+        public boolean canContinueToUse() {
+            return this.canUse();
+        }
+
+        @Override
+        public boolean requiresUpdateEveryTick() {
+            return true;
+        }
+
+        @Override
+        public void start() {
+            this.previousNoGravity = NailongEntity.this.isNoGravity();
+            NailongEntity.this.flightGravityOverride = !this.previousNoGravity;
+            NailongEntity.this.navigation.stop();
+            NailongEntity.this.setNoGravity(true);
+            NailongEntity.this.flightLandingProtected = true;
+        }
+
+        @Override
+        public void tick() {
+            NailongEntity.this.navigation.stop();
+            NailongEntity.this.fallDistance = 0;
+            NailongEntity.this.getLookControl().setLookAt(this.owner, 10.0F, 40.0F);
+            Vec3 destination = this.owner.position().add(2.0D, 0.0D, 0.0D);
+            Vec3 delta = destination.subtract(NailongEntity.this.position());
+            if (delta.lengthSqr() >= 144.0D) {
+                // Check loaded space, world limits and collisions before catching up in midair.
+                for (int i = 0; i < 8; i++) {
+                    Vec3 candidate = this.owner.position().add(
+                            (i % 2 == 0 ? 2.0D : -2.0D), i / 4,
+                            (i % 4 < 2 ? 2.0D : -2.0D));
+                    var box = NailongEntity.this.getBoundingBox().move(candidate.subtract(NailongEntity.this.position()));
+                    var pos = net.minecraft.core.BlockPos.containing(candidate);
+                    if (NailongEntity.this.level().hasChunkAt(pos)
+                            && !NailongEntity.this.level().isOutsideBuildHeight(pos)
+                            && NailongEntity.this.level().getWorldBorder().isWithinBounds(box)
+                            && NailongEntity.this.level().noCollision(NailongEntity.this, box)
+                            && !NailongEntity.this.level().containsAnyLiquid(box)) {
+                        NailongEntity.this.teleportTo(candidate.x, candidate.y, candidate.z);
+                        NailongEntity.this.setDeltaMovement(Vec3.ZERO);
+                        return;
+                    }
+                }
+            }
+            NailongEntity.this.setDeltaMovement(delta.lengthSqr() < 0.25D
+                    ? Vec3.ZERO : delta.normalize().scale(Math.min(0.8D, delta.length() * 0.2D)));
+        }
+
+        @Override
+        public void stop() {
+            this.owner = null;
+            NailongEntity.this.setNoGravity(this.previousNoGravity);
+            NailongEntity.this.flightGravityOverride = false;
+            NailongEntity.this.setDeltaMovement(Vec3.ZERO);
+            NailongEntity.this.fallDistance = 0;
+        }
     }
 
     @Override
